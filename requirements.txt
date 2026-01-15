@@ -4,3 +4,4 @@ flask-swagger-ui
 Flask-Limiter
 python-magic
 gunicorn
+zipstream-new

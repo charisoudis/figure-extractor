@@ -1,14 +1,20 @@
-from flask import request, jsonify, send_from_directory, g
-from . import app, limiter
-from .utils import (
-    save_uploaded_file, save_and_extract_zip,
-    error_response, success_response, validate_pdf_file, 
-    ERROR_CODES
-)
-from .service import run_pdffigures2, count_figures_and_tables, run_pdffigures2_batch
+import json
 import logging
 import shutil
+import tempfile
 from pathlib import Path
+from zipfile import ZIP_DEFLATED
+
+from flask import request, jsonify, send_from_directory
+from zipstream import ZipFile
+
+from . import app, limiter
+from .service import run_pdffigures2, run_pdffigures2_batch
+from .utils import (
+    save_uploaded_file, save_and_extract_zip,
+    error_response, success_response, validate_pdf_file,
+    ERROR_CODES
+)
 
 
 def allowed_file(filename: str) -> bool:
@@ -21,9 +27,9 @@ def allowed_file(filename: str) -> bool:
 @limiter.limit("100 per minute")
 def extract_figures():
     """Extract figures and tables from a single PDF file.
-    
+
     Rate limit: 10 requests per minute
-    
+
     Returns:
         JSON response with extraction results or error message
     """
@@ -36,7 +42,7 @@ def extract_figures():
         )
 
     file = request.files['file']
-    
+
     # Validate PDF file
     is_valid, error_msg = validate_pdf_file(file)
     if not is_valid:
@@ -55,7 +61,7 @@ def extract_figures():
 
         # run_pdffigures2 now raises on error and returns a summary dict
         result = run_pdffigures2(file_path, output_dir)
-        
+
         logging.info(f"Successfully extracted figures from {file.filename}")
 
         # Build response data
@@ -70,12 +76,12 @@ def extract_figures():
             "time_in_millis": result.get("time_in_millis", 0),
             "document": result.get("document"),
         }
-        
+
         return success_response(
             data=data,
             message="Figures extracted successfully"
         )
-        
+
     except Exception as e:
         logging.error(f"Error executing pdffigures2: {e}")
         return error_response(
@@ -83,7 +89,7 @@ def extract_figures():
             error_code=ERROR_CODES['PROCESSING_ERROR'],
             status_code=500
         )
-        
+
     finally:
         # CRITICAL: Clean up uploaded file to prevent disk space exhaustion
         if file_path and file_path.exists():
@@ -94,18 +100,81 @@ def extract_figures():
                 logging.error(f"Failed to cleanup {file_path}: {cleanup_error}")
 
 
+@app.route('/extract.zip', methods=['POST'])
+@limiter.limit("5 per minute")
+def extract_figures_zip():
+    if 'file' not in request.files:
+        return error_response(
+            "No file uploaded",
+            error_code=ERROR_CODES['VALIDATION_ERROR'],
+            status_code=400
+        )
+    file = request.files['file']
+    is_valid, error_msg = validate_pdf_file(file)
+    if not is_valid:
+        return error_response(
+            error_msg,
+            error_code=ERROR_CODES['INVALID_FILE_TYPE'],
+            status_code=400
+        )
+
+    saved_path = None
+
+    def generate():
+        nonlocal saved_path, output_dir
+        saved_path = save_uploaded_file(file)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            result = run_pdffigures2(saved_path, output_dir)
+            z = ZipFile(mode='w', compression=ZIP_DEFLATED)
+            manifest = json.dumps({
+                "num_tables": result.get("n_tables", 0),
+                "num_figures": result.get("n_figures", 0),
+                "metadata_file": result.get("metadata_filename"),
+                "metadata_filename": result.get("metadata_filename"),
+                "figures": result.get("figures", []),
+                "tables": result.get("tables", []),
+                "pages": result.get("pages", 0),
+                "time_in_millis": result.get("time_in_millis", 0),
+                "document": result.get("document")
+            }).encode('utf-8')
+            z.write_iter('manifest.json', iter([manifest]))
+            for f in result.get('figures', []):
+                p = output_dir / f.get('filename', '')
+                if p.is_file():
+                    z.write(str(p), arcname=f"figures/{p.name}")
+            for t in result.get('tables', []):
+                p = output_dir / t.get('filename', '')
+                if p.is_file():
+                    z.write(str(p), arcname=f"tables/{p.name}")
+            for chunk in z:
+                yield chunk
+
+    resp = app.response_class(generate(), mimetype='application/zip')
+    resp.headers['Content-Disposition'] = 'attachment; filename="extraction.zip"'
+
+    @resp.call_on_close
+    def _cleanup():
+        try:
+            if saved_path and saved_path.exists():
+                saved_path.unlink()
+        except Exception:
+            pass
+    return resp
+
+
 @app.route('/extract_batch', methods=['POST'])
 @limiter.limit("100 per minute")
 def extract_batch():
     """Extract figures and tables from multiple PDF files in a ZIP archive.
-    
+
     Rate limit: 5 requests per minute (more intensive than single file)
-    
+
     Returns:
         JSON response with extraction results for all PDFs or error message
     """
     logging.info("Starting batch extraction route")
-    
+
     # Validate file presence
     if 'folder' not in request.files:
         return error_response(
@@ -115,7 +184,7 @@ def extract_batch():
         )
 
     folder = request.files['folder']
-    
+
     if folder.filename == '':
         return error_response(
             "Empty filename",
@@ -137,7 +206,7 @@ def extract_batch():
         try:
             temp_dir = save_and_extract_zip(folder)
             logging.debug(f"Extracted zip to directory: {temp_dir}")
-            
+
             output_dir = Path(app.config['OUTPUT_FOLDER'])
             output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -150,7 +219,7 @@ def extract_batch():
                 data=result,
                 message="Batch extraction completed"
             )
-        
+
         except Exception as e:
             logging.error(f"Batch extraction error: {str(e)}")
             return error_response(
@@ -158,7 +227,7 @@ def extract_batch():
                 error_code=ERROR_CODES['PROCESSING_ERROR'],
                 status_code=500
             )
-        
+
         finally:
             if temp_dir and temp_dir.exists():
                 try:
@@ -172,19 +241,19 @@ def extract_batch():
 @limiter.limit("1000 per minute")
 def download_file(filename):
     """Download the extracted file.
-    
+
     Rate limit: 30 requests per minute
-    
+
     Args:
         filename: Name of the file to download
-        
+
     Returns:
         File download response or error
     """
     try:
         directory = Path(app.config['OUTPUT_FOLDER'])
         file_path = directory / filename
-        
+
         # Security: prevent directory traversal
         if not file_path.resolve().is_relative_to(directory.resolve()):
             return error_response(
@@ -192,16 +261,16 @@ def download_file(filename):
                 error_code=ERROR_CODES['VALIDATION_ERROR'],
                 status_code=400
             )
-        
+
         if not file_path.exists():
             return error_response(
                 f"File not found: {filename}",
                 error_code=ERROR_CODES['FILE_NOT_FOUND'],
                 status_code=404
             )
-        
+
         return send_from_directory(str(directory), filename)
-        
+
     except Exception as e:
         logging.error(f"Download error: {e}")
         return error_response(
@@ -215,9 +284,9 @@ def download_file(filename):
 @limiter.exempt
 def health():
     """Health check endpoint for load balancers and orchestrators.
-    
+
     No rate limit applied to health checks.
-    
+
     Returns:
         JSON with status and HTTP 200 if healthy
     """
@@ -234,35 +303,35 @@ def health():
 @limiter.exempt
 def readiness():
     """Readiness check - verify all dependencies are available.
-    
+
     No rate limit applied to readiness checks.
-    
+
     Returns:
         JSON with status and HTTP 200 if ready, 503 if not ready
     """
     import os
     import time
-    
+
     checks = {
         "pdffigures2_jar": False,
         "output_dir_writable": False,
         "upload_dir_writable": False,
     }
-    
+
     try:
         # Check if pdffigures2 JAR exists
         from core.config import PDF_FIGURES2_JAR
         jar_path = Path(PDF_FIGURES2_JAR)
         checks["pdffigures2_jar"] = jar_path.exists()
-        
+
         # Check output directory is writable
         output_dir = Path(app.config['OUTPUT_FOLDER'])
         checks["output_dir_writable"] = output_dir.exists() and os.access(output_dir, os.W_OK)
-        
+
         # Check upload directory is writable
         upload_dir = Path(app.config['UPLOAD_FOLDER'])
         checks["upload_dir_writable"] = upload_dir.exists() and os.access(upload_dir, os.W_OK)
-        
+
         # All checks must pass
         if all(checks.values()):
             return jsonify({
@@ -276,7 +345,7 @@ def readiness():
                 "checks": checks,
                 "timestamp": time.time()
             }), 503
-            
+
     except Exception as e:
         logging.error(f"Readiness check failed: {e}")
         return jsonify({
@@ -299,4 +368,3 @@ def ratelimit_handler(e):
             "retry_after": getattr(e, 'description', 'Please wait before retrying')
         }
     )
-

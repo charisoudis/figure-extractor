@@ -10,12 +10,12 @@ RUN apt-get update && apt-get install -y \
     git \
     python3-pip \
     libmagic1 && \
-    # Add sbt repository and install sbt
+    # Add sbt repository and install sbt \
     echo "deb https://repo.scala-sbt.org/scalasbt/debian all main" | tee /etc/apt/sources.list.d/sbt.list && \
     curl -sL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x99E82A75642AC823" | apt-key add && \
     apt-get update && \
     apt-get install -y sbt && \
-    # Clean up to reduce image size
+    # Clean up to reduce image size \
     rm -rf /var/lib/apt/lists/*
 
 # Clone the pdffigures2 repository from GitHub
@@ -26,7 +26,7 @@ WORKDIR /pdffigures2
 
 # Build pdffigures2 with sbt assembly
 RUN sbt assembly && \
-    # Move the built jar to a predictable location
+    # Move the built jar to a predictable location \
     mv /pdffigures2/pdffigures2.jar /pdffigures2.jar || \
     mv /pdffigures2/target/scala-2.12/pdffigures2-assembly-*.jar /pdffigures2.jar || \
     mv /pdffigures2/target/scala-2.11/pdffigures2-assembly-*.jar /pdffigures2.jar
@@ -39,7 +39,7 @@ COPY . /app/
 
 # Install Flask & other required Python packages
 RUN pip3 install --no-cache-dir -r /app/requirements.txt && \
-    pip3 install --no-cache-dir gunicorn
+    pip3 install --no-cache-dir gunicorn zipstream-new
 
 # Set environment variables
 ENV PDFFIGURES2_JAR=/pdffigures2.jar
@@ -53,12 +53,12 @@ ENV LOG_LEVEL=INFO
 ENV ENABLE_CLEANUP=true
 ENV CLEANUP_INTERVAL_SECONDS=3600
 
-# Expose port 5001 for the Flask app (where it will run)
-EXPOSE 5001
+# Expose port 8080 for the Flask app (where it will run)
+EXPOSE 8080
 
 # Add health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD curl -f http://localhost:5001/health || exit 1
+    CMD curl -f http://localhost:${PORT:-8080}/health || exit 1
 
 # Default number of gunicorn workers (single worker to serialize heavy jobs)
 ENV GUNICORN_WORKERS=1
@@ -66,4 +66,4 @@ ENV GUNICORN_TIMEOUT=600
 
 # Command to run the Flask server via gunicorn
 # "run:app" assumes run.py exposes a top-level Flask `app` object.
-CMD ["gunicorn", "-w", "1", "--timeout", "600", "-b", "0.0.0.0:5001", "run:app"]
+CMD ["sh", "-c", "gunicorn -w ${GUNICORN_WORKERS:-1} --timeout ${GUNICORN_TIMEOUT:-600} -b 0.0.0.0:${PORT:-8080} run:app"]

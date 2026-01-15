@@ -2,7 +2,6 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-import urllib.request
 
 def check_java():
     """Check if Java is installed."""
