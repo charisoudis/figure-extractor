@@ -1,4 +1,4 @@
-from flask import Flask, request, g
+from flask import Flask, request, g, jsonify
 import os
 import logging
 from flask_swagger_ui import get_swaggerui_blueprint
@@ -9,6 +9,9 @@ from core.config import (
     LOG_LEVEL, UPLOAD_ROOT, OUTPUT_ROOT, MAX_CONTENT_LENGTH, 
     ALLOWED_EXTENSIONS, ENABLE_CLEANUP, CLEANUP_INTERVAL_SECONDS
 )
+
+AUTH_DISABLED = os.environ.get("AUTH_DISABLED", "0") == "1"
+SHARED = os.environ.get("FIGEX_SHARED_SECRET", "")
 
 # Configure logging
 logging.basicConfig(
@@ -43,6 +46,21 @@ limiter = Limiter(
 def add_request_id():
     g.request_id = request.headers.get('X-Request-ID', str(uuid.uuid4()))
 
+
+@app.before_request
+def gate():
+    # allow health/docs/static without auth
+    if request.path == '/health' or request.path.startswith('/api/docs') or request.path.startswith('/static/'):
+        return None
+    if not AUTH_DISABLED and request.headers.get('X-FIGEX-KEY') != SHARED:
+        return jsonify({"error": "unauthorized"}), 401
+    return None
+
+@app.route('/health', methods=['GET'])
+@limiter.exempt
+def health():
+    return jsonify({"ok": True}), 200
+
 @app.after_request
 def add_request_id_header(response):
     if hasattr(g, 'request_id'):
@@ -73,10 +91,10 @@ if CLEANUP_AVAILABLE and ENABLE_CLEANUP:
         logging.error(f"Failed to start cleanup worker: {e}")
 
 SWAGGER_URL = '/api/docs'
-API_URL = '/static/openapi.yaml' 
+API_URL = '/static/openapi.yaml'
 swaggerui_blueprint = get_swaggerui_blueprint(
     SWAGGER_URL,
     API_URL,
-    config={'app_name': "Figure Extractor API"}
+    config={'app_name': 'Figure Extractor API'}
 )
 app.register_blueprint(swaggerui_blueprint, url_prefix=SWAGGER_URL)
