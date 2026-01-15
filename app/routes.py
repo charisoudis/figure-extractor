@@ -121,7 +121,7 @@ def extract_figures_zip():
     saved_path = None
 
     def generate():
-        nonlocal saved_path, output_dir
+        nonlocal saved_path
         saved_path = save_uploaded_file(file)
         with tempfile.TemporaryDirectory() as tmpdir:
             output_dir = Path(tmpdir)
