@@ -56,11 +56,6 @@ def gate():
         return jsonify({"error": "unauthorized"}), 401
     return None
 
-@app.route('/health', methods=['GET'])
-@limiter.exempt
-def health():
-    return jsonify({"ok": True}), 200
-
 @app.after_request
 def add_request_id_header(response):
     if hasattr(g, 'request_id'):

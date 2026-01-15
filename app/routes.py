@@ -128,6 +128,8 @@ def extract_figures_zip():
             result = run_pdffigures2(saved_path, output_dir)
             z = ZipFile(mode='w', compression=ZIP_DEFLATED)
             manifest = json.dumps({
+                """
+               """
                 "num_tables": result.get("n_tables", 0),
                 "num_figures": result.get("n_figures", 0),
                 "metadata_file": result.get("metadata_filename"),
